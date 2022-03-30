@@ -1,0 +1,231 @@
+#!/usr/bin/perl
+################################################################################
+use YAML::Tiny;     # libyaml-tiny-perl
+use LWP;            # liblwp-protocol-https-perl
+use Data::Dumper;
+use JSON;           # libjson-perl
+use DBI;            # libdbd-mysql-perl / libdbi-perl
+################################################################################
+$baseURL = "https://www.buxfer.com/api";
+################################################################################
+opendir (DIR, "/config");
+my @configFiles = readdir(DIR);
+closedir (DIR);
+foreach (@configFiles)
+{
+    my $configKey = $_;
+    open(IN, "/config/" . $configKey);
+    my $configValue = <IN>;
+    close (IN);
+    $config->{$configKey} = $configValue;
+}
+################################################################################
+my $debug = 1;
+################################################################################
+print "**********************************************\n";
+print "BaseURL :: $baseURL\n";
+print "CONFIG :: " . Dumper($config) . "\n";
+print "**********************************************\n";
+################################################################################
+&dbInit;
+&initSQL;
+#########
+&createSchema;
+#########
+$token = &doLogin;
+&getAccounts($token);
+&getTransactions($token,1);
+################################################################################
+################################################################################
+sub getTransactions
+{
+    my ($token, $page) = @_;
+    ######
+    print "Loading Page : $page\n";
+    ######
+    my $browser = LWP::UserAgent->new(verify_hostname => 0);
+	$browser->agent('Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; InfoPath.1; .NET CLR 2.0.50727)');
+	my $request = HTTP::Request->new('GET', "$baseURL/transactions?token=$token&page=$page");
+    $request->header('Content-Type' => 'application/x-www-form-urlencoded');
+	$request->header('Connection' => 'keep-alive');
+    #####
+    if ($debug)
+    {
+        print "REQUEST :: " . Dumper($request) . "\n";
+    }
+    #####
+	my $response = $browser->request($request)->{"_content"};
+    #####
+    if ($debug)
+    {
+        print "RESPONSE :: " . Dumper($response) . "\n";
+    }
+    #####
+    my $transDataRAW = decode_json $response;
+    ######
+    my $pullStatus = $transDataRAW->{'response'}{'status'};
+    my $pullTransCount = $transDataRAW->{'response'}{'numTransactions'};
+    my $pageCount = int($pullTransCount / 100) + 1 ;
+    print "\tLoading :: $page of $pageCount :: $pullStatus\n";
+    ######
+    if ($pullStatus eq "OK")
+    {
+        foreach (@{$transDataRAW->{'response'}{'transactions'}})
+        {
+            my $transInfo = $_;
+            my $transID = $_->{'id'};
+            my $transStatus = $_->{'status'};
+            my $transDate = $_->{'date'};
+            my $transTags = $_->{'tags'};
+            my $transAccountName = $_->{'accountName'};
+            my $transPending = $_->{'isPending'};
+            my $transAmount = $_->{'amount'};
+            my $transType = $_->{'transactionType'};
+            my $transAccountId = $_->{'accountId'};
+            my $transDescription = $_->{'description'};
+            #########
+            $insertTransaction->execute($transID,$transStatus,$transDate,$transTags,$transAccountName,$transPending,$transAmount,$transType,$transAccountId,$transDescription,$transStatus,$transDate,$transTags,$transAccountName,$transPending,$transAmount,$transType,$transAccountId,$transDescription);
+            #########
+        }
+        if ($page < $pageCount)
+        {
+            $page ++;
+            &getTransactions($token,$page);
+        }
+    }
+    else
+    {
+        die ("Error pulling transactions list\n");
+    }
+}
+################################################################################\
+sub getAccounts
+{
+    my ($token) = @_;
+    #####
+    my $browser = LWP::UserAgent->new(verify_hostname => 0);
+	$browser->agent('Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; InfoPath.1; .NET CLR 2.0.50727)');
+	my $request = HTTP::Request->new('GET', "$baseURL/accounts?token=$token");
+    $request->header('Content-Type' => 'application/x-www-form-urlencoded');
+	$request->header('Connection' => 'keep-alive');
+    #####
+    if ($debug)
+    {
+        print "REQUEST :: " . Dumper($request) . "\n";
+    }
+    #####
+	my $response = $browser->request($request)->{"_content"};
+    #####
+    if ($debug)
+    {
+        print "RESPONSE :: " . Dumper($response) . "\n";
+    }
+    #####
+    my $accountDataRAW = decode_json $response;
+    my $pullStatus = $accountDataRAW->{'response'}{'status'};
+    if ($pullStatus eq "OK")
+    {
+        foreach (@{$accountDataRAW->{'response'}{'accounts'}})
+        {
+           my $accountInfo = $_;
+           my $accountID = $_->{'id'};
+           my $accountBalance = $_->{'balance'};
+           my $accountSynced = $_->{'lastSynced'};
+           my $accountCurrency = $_->{'currency'};
+           my $accountBank = $_->{'bank'};
+           my $accountName = $_->{'name'};
+           ######
+           $insertAccount->execute($accountID, $accountBalance, $accountSynced, $accountCurrency, $accountBank, $accountName, $accountBalance, $accountSynced, $accountCurrency, $accountBank, $accountName);
+        }
+    }
+    else
+    {
+        die ("Error pulling account list\n");
+    }
+}
+################################################################################
+sub initSQL
+{
+    my $insertAccount_SQL =  "INSERT INTO buxfer.Accounts (accountID, accountBalance, accountSynced, accountCurrency, accountBank, accountName) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE accountBalance = ?, accountSynced = ?, accountCurrency = ?, accountBank = ?, accountName = ?;";
+	if (!($insertAccount = $dbh->prepare($insertAccount_SQL))) { die "Unable to prepare :: $insertAccount_SQL\n";}
+    ##########
+    my $insertTransaction_SQL = "INSERT INTO buxfer.Transactions (transID, transStatus, transDate, transTags, transAccountName, transPending, transAmount, transType, transAccountID, transDescription) VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE transStatus = ?, transDate = ?, transTags = ?, transAccountName = ?, transPending = ?, transAmount = ?, transType = ?, transAccountID = ?, transDescription = ?";
+    if (!($insertTransaction = $dbh->prepare($insertTransaction_SQL))) { die "Unable to prepare :: $insertTransaction_SQL\n";}
+}
+################################################################################
+sub doLogin
+{
+    my $param = "email=" . $config->{'userEmail'} . "&";
+	$param .= "password=" . $config->{'userPass'} . "&";
+    ########################################
+    my $browser = LWP::UserAgent->new(verify_hostname => 0);
+	$browser->agent('Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; InfoPath.1; .NET CLR 2.0.50727)');
+	my $request = HTTP::Request->new('POST', $baseURL . "/login");
+    $request->header('Content-Type' => 'application/x-www-form-urlencoded');
+	$request->header('Connection' => 'keep-alive');
+    $request->content($param);
+    #####
+    if ($debug)
+    {
+        print "REQUEST :: " . Dumper($request) . "\n";
+    }
+    #####
+	my $response = $browser->request($request)->{"_content"};
+    #####
+    if ($debug)
+    {
+        print "RESPONSE :: " . Dumper($response) . "\n";
+    }
+    #####
+    my $jsonData = decode_json $response;
+    my $loginToken = $jsonData->{'response'}{'token'};
+	########################################
+    return $loginToken;
+}
+################################################################################
+sub dbInit
+{
+	$database_port = "3306";
+	#########################
+    $database_srvr = $config->{'dbServer'};
+    $database_user = $config->{'dbUser'};
+    $database_pass = $config->{'dbPass'};
+    #########################
+	my $driver = "mysql";
+	#####
+	my $dsn = "DBI:$driver:database=$database:host=$database_srvr;port=$database_port";
+	#####
+	if (!($dbh = DBI->connect($dsn, $database_user, $database_pass,{PrintError => 1,RaiseError => 1,AutoCommit => 1,ShowErrorStatement=>1}))) {die "Error connecting to $database_srvr.\n";};
+}
+################################################################################
+sub createSchema
+{
+    @expectedTables = ('Accounts','Transactions');
+    ##########
+    $createStatement->{'Accounts'} = "CREATE TABLE `buxfer`.`Accounts` ( `accountID` varchar(20) NOT NULL, `accountName` varchar(250) DEFAULT NULL, `accountBalance` float(7,2) DEFAULT NULL, `accountBank` varchar(150) DEFAULT NULL, `accountCurrency` varchar(10) DEFAULT NULL, `accountSynced` datetime DEFAULT NULL, `accountAdded` timestamp NULL DEFAULT current_timestamp(), PRIMARY KEY (`accountID`)) ENGINE=InnoDB DEFAULT CHARSET=latin1;";
+    $createStatement->{'Transactions'} = "CREATE TABLE `buxfer`.`Transactions` ( `transID` varchar(20) NOT NULL, `transStatus` varchar(45) DEFAULT NULL, `transDate` date DEFAULT NULL, `transTags` varchar(250) DEFAULT NULL, `transAccountName` varchar(150) DEFAULT NULL, `transPending` varchar(45) DEFAULT NULL, `transAmount` float(7,2) DEFAULT NULL, `transType` varchar(45) DEFAULT NULL, `transAccountID` varchar(45) DEFAULT NULL, `transDescription` varchar(250) DEFAULT NULL, `transAdded` timestamp NULL DEFAULT current_timestamp(), PRIMARY KEY (`transID`)) ENGINE=InnoDB DEFAULT CHARSET=latin1;";
+    ##########
+    my $getTableList_SQL = "SHOW TABLES from `buxfer`;";
+	if (!($getTableList = $dbh->prepare($getTableList_SQL))) { print "Unable to prepare :: $getTableList_SQL\n"; 	exit; }
+	if ($getTableList->execute())
+	{
+		while (my ($tableName) = $getTableList->fetchrow_array())
+		{
+			$tableList->{$tableName} = 1;
+		}
+	}
+    ##########
+    foreach (@expectedTables)
+    {
+        my $tableExist = $tableList->{$_};
+        if (!$tableExist)
+        {
+            print "Creating missing table :: $_\n";
+            my $createTable_SQL = $createStatement->{$_};
+            if (!($createTable = $dbh->prepare($createTable_SQL))) { print "Unable to prepare :: $createTable_SQL\n"; 	exit; }
+            $createTable->execute()
+            
+        }
+    }
+}
+
